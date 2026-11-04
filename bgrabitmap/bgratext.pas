@@ -8,7 +8,11 @@
   Text functions use a temporary bitmap where the operating system text drawing
   is used. Then it is scaled down (if antialiasing is activated) and colored.
 
-  These routines are rather slow, so you may use other font renderers
+  Cocoa renders undecorated horizontal lines directly with CoreText, using
+  native vertical antialiasing and horizontal-only 3x sampling for fine
+  RGB/BGR. Other layouts retain the system bitmap fallback.
+
+  The bitmap fallback can be slow, so you may use other font renderers
   like TBGRATextEffectFontRenderer in BGRATextFX if you want to use LCL fonts,
   or, if you have TrueType fonts files, you may use TBGRAFreeTypeFontRenderer
   in BGRAFreeType.
@@ -210,7 +214,8 @@ procedure BitmapFillRect(ABitmap: TBitmap; ARect: TRect; AColor: TColor);
 
 implementation
 
-uses Math, BGRATransform, BGRABlend, BGRAUTF8, BGRAUnicode, BGRATextBidi{$IFDEF LCLgtk2}, BGRAGtk2Text{$ENDIF}{$IFDEF LCLgtk3}, BGRAGtk3Text{$ENDIF}
+uses Math, BGRATransform, BGRABlend, BGRAUTF8, BGRAUnicode, BGRATextBidi
+     {$IFDEF LCLCOCOA}, BGRACocoaText{$ENDIF}{$IFDEF LCLgtk2}, BGRAGtk2Text{$ENDIF}{$IFDEF LCLgtk3}, BGRAGtk3Text{$ENDIF}
      {$IFDEF LCL}, Forms, LCLIntf, LCLType{$IF lcl_fullversion >= 1070000}, lclplatformdef{$ENDIF}{$ENDIF};
 
 const MaxPixelMetricCount = 100;
@@ -1003,6 +1008,10 @@ var
   actualAntialiasingLevel{$IFDEF LCL}{$IF lcl_fullversion < 1070000}, len1{$ENDIF}{$ENDIF}: Integer;
   tempBmp: TBitmap;
 begin
+  {$IFDEF LCLCOCOA}
+  if SystemFontAvailable and BGRACocoaTextSupported(Font, AOrientation, sUTF8) then
+    exit(BGRACocoaTextFitInfo(Font, sUTF8, AMaxWidth));
+  {$ENDIF}
   if (AMaxWidth = 0) or (length(sUTF8)=0) then exit(0);
   actualAntialiasingLevel:= CustomAntialiasingLevel;
   if not SystemFontAvailable then
@@ -1044,6 +1053,12 @@ function BGRATextSizeStyle(Font: TFont; Quality: TBGRAFontQuality;
   sUTF8: string; AStyle: TTextStyle;
   CustomAntialiasingLevel: integer; AMaxWidth: integer): TSize;
 begin
+  {$IFDEF LCLCOCOA}
+  if SystemFontAvailable and AStyle.SingleLine and not AStyle.ShowPrefix and
+     not AStyle.Wordbreak and not AStyle.EndEllipsis and
+     BGRACocoaTextSupported(Font, 0, sUTF8) then
+    exit(BGRACocoaTextSize(Font, sUTF8));
+  {$ENDIF}
   {$IFDEF SYSTEM_RENDERER_IS_FINE}
   if Quality = fqFineAntialiasing then Quality:= fqSystem;
   {$ENDIF}
@@ -1079,7 +1094,7 @@ begin
   result := BGRATextSizeAngle(Font, Font.Orientation, Quality, sUTF8, CustomAntialiasingLevel);
 end;
 
-function BGRATextSizeAngle(Font: TFont; AOrientation: integer; Quality: TBGRAFontQuality; sUTF8: string; CustomAntialiasingLevel: Integer): TSize;
+function BGRATextSizeAngleFallback(Font: TFont; AOrientation: integer; Quality: TBGRAFontQuality; sUTF8: string; CustomAntialiasingLevel: Integer): TSize;
 begin
   {$IFDEF SYSTEM_RENDERER_IS_FINE}
   if Quality = fqFineAntialiasing then Quality:= fqSystem;
@@ -1090,6 +1105,15 @@ begin
     result.cx := ceil(Result.cx/CustomAntialiasingLevel);
     result.cy := ceil(Result.cy/CustomAntialiasingLevel);
   end;
+end;
+
+function BGRATextSizeAngle(Font: TFont; AOrientation: integer; Quality: TBGRAFontQuality; sUTF8: string; CustomAntialiasingLevel: Integer): TSize;
+begin
+  {$IFDEF LCLCOCOA}
+  if SystemFontAvailable and BGRACocoaTextSupported(Font, AOrientation, sUTF8) then
+    exit(BGRACocoaTextSize(Font, sUTF8));
+  {$ENDIF}
+  result := BGRATextSizeAngleFallback(Font,AOrientation,Quality,sUTF8,CustomAntialiasingLevel);
 end;
 
 procedure FilterOriginalText(Quality: TBGRAFontQuality; CustomAntialiasingLevel: Integer; var temp: TBGRACustomBitmap;
@@ -1211,6 +1235,14 @@ begin
     BGRATextOutAngle(bmp,Font,Quality,xf,yf,Font.Orientation,sUTF8,c,tex,align);
     exit;
   end;
+
+  {$IFDEF LCLCOCOA}
+  if BGRACocoaTextSupported(Font, 0, sUTF8) then
+  begin
+    BGRACocoaTextOut(bmp,Font,Quality,xf,yf,sUTF8,c,tex,align);
+    exit;
+  end;
+  {$ENDIF}
 
   {$IFDEF SYSTEM_RENDERER_IS_FINE}
   if (Quality in [fqFineAntialiasing, fqFineClearTypeRGB, fqFineClearTypeBGR]) and
@@ -1463,6 +1495,19 @@ begin
   if (tx <= 0) or (ty <= 0) then
     exit;
 
+  {$IFDEF LCLCOCOA}
+  if style.SingleLine and not style.ShowPrefix and not style.Wordbreak and
+     not style.EndEllipsis and (style.Alignment = taLeftJustify) and
+     (style.Layout = tlTop) and BGRACocoaTextSupported(Font, 0, sUTF8) then
+  begin
+    if style.RightToLeft then sUTF8 := UTF8EmbedDirection(sUTF8,true);
+    bmp.ClipRect := lim;
+    try BGRACocoaTextOut(bmp,Font,Quality,xf,yf,sUTF8,c,tex,taLeftJustify);
+    finally bmp.ClipRect := cr end;
+    exit;
+  end;
+  {$ENDIF}
+
   {$IFDEF SYSTEM_RENDERER_IS_FINE}
   if (Quality in [fqFineAntialiasing, fqFineClearTypeRGB, fqFineClearTypeBGR]) and
      (BGRATextSize(Font, fqSystem, 'Hg', 1).cy >= 13) then
@@ -1579,6 +1624,12 @@ begin
            BGRADefaultTextOutStyle(False, AShowPrefix), MaxLongint));
   {$ENDIF}
   if AShowPrefix then sUTF8 := RemovePrefix(sUTF8);
+  {$IFDEF LCLCOCOA}
+  // Prefix decorations keep the original bitmap path and its measurements.
+  if AShowPrefix then
+    result := BGRATextSizeAngleFallback(FFont,AOrientation,FontQuality,sUTF8,FontAntialiasingLevel)
+  else
+  {$ENDIF}
   result := BGRAText.BGRATextSizeAngle(FFont, AOrientation, FontQuality,
                                        sUTF8, FontAntialiasingLevel);
   if (result.cy >= 24) 
@@ -2020,7 +2071,8 @@ begin
     if AOrientation mod 3600 = 0 then
     begin
       {$IFNDEF TEXTOUT_KERNING_PATCH}
-      if not AShowPrefix and not ARightToLeft then
+      if not AShowPrefix and (not ARightToLeft
+        {$IFDEF LCLCOCOA}or BGRACocoaTextSupported(FFont,AOrientation,sUTF8){$ENDIF}) then
         BGRAText.BGRATextOut(ADest,FFont,FontQuality,x,y,sUTF8,c,texture,align,
           0) else
       {$ENDIF}
